@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT license.
@@ -62,7 +62,7 @@ checkEmptyStdout \
 # Note: we rely on binary files being identified correctly (cf. above)
 # TODO limit to specific extensions if necessary
 checkEmptyStdout \
-  "git grep -I -l \$'\t' $gitTree | cut -d: -f2- | grep -v ^external/ | grep -v \.sln$ | grep -v /Makefile$ | grep -v project\.pbxproj | grep -v Info\.plist" \
+  "git grep -I -l \$'\t' $gitTree | cut -d: -f2- | grep -v -e ^external/ -e \.sln$ -e /Makefile$ -e project\.pbxproj -e Info\.plist -e sampledata/.*\.txt -e public_samples/speech/sampledata/.*\.txt" \
   "text file(s) with hard tabs encountered"
 
 checkEmptyStdout \
@@ -70,13 +70,17 @@ checkEmptyStdout \
   "Shell scripts should have executable permissions set, please fix"
 
 checkEmptyStdout \
-  "git grep -I -l $'\xEF\xBB\xBF' $gitTree | cut -d: -f2" \
+  "git grep -I -l $'\xEF\xBB\xBF' $gitTree | cut -d: -f2 | grep -v -e sampledata/.*\.txt -e public_samples/speech/sampledata/.*\.txt" \
   "BOM detected, please remove from beginning of files (or add an exception)"
 
 # Note: we rely on binary files being identified correctly (cf. above)
 checkEmptyStdout \
   "git grep -I -l $'\r$' $gitTree | cut -d: -f2" \
   "CR LF detected in the (in-repo) version of text file(s), please change to just LF"
+
+checkEmptyStdout \
+  "git grep -l -i -I -E '(azure|docs|learn|msdn|www)\.microsoft\.com/en-us/' $gitTree | cut -d: -f2-" \
+  "Remove /en-us/ from (azure|docs|learn|msdn|www).microsoft.com links as we shouldn't be overriding user (browser) language preference"
 
 if [ $errorCount -ne 0 ]
 then

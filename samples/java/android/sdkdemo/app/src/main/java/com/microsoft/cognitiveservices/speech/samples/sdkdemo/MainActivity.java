@@ -4,34 +4,51 @@
 //
 package com.microsoft.cognitiveservices.speech.samples.sdkdemo;
 
-import android.support.v4.app.ActivityCompat;
-import android.support.v7.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.text.method.ScrollingMovementMethod;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
 
+import com.github.difflib.DiffUtils;
+
+import com.github.difflib.patch.AbstractDelta;
+import com.github.difflib.patch.DeltaType;
+import com.github.difflib.patch.Patch;
+import com.microsoft.cognitiveservices.speech.PronunciationAssessmentConfig;
+import com.microsoft.cognitiveservices.speech.PronunciationAssessmentGradingSystem;
+import com.microsoft.cognitiveservices.speech.PronunciationAssessmentGranularity;
+import com.microsoft.cognitiveservices.speech.PronunciationAssessmentResult;
+import com.microsoft.cognitiveservices.speech.PropertyId;
+import com.microsoft.cognitiveservices.speech.WordLevelTimingResult;
 import com.microsoft.cognitiveservices.speech.audio.AudioConfig;
 import com.microsoft.cognitiveservices.speech.ResultReason;
-import com.microsoft.cognitiveservices.speech.intent.LanguageUnderstandingModel;
 import com.microsoft.cognitiveservices.speech.SpeechConfig;
-import com.microsoft.cognitiveservices.speech.intent.IntentRecognitionResult;
-import com.microsoft.cognitiveservices.speech.intent.IntentRecognizer;
 import com.microsoft.cognitiveservices.speech.SpeechRecognitionResult;
 import com.microsoft.cognitiveservices.speech.SpeechRecognizer;
-import com.microsoft.cognitiveservices.speech.samples.sdkdemo.MicrophoneStream;
 import com.microsoft.cognitiveservices.speech.CancellationDetails;
+import com.microsoft.cognitiveservices.speech.KeywordRecognitionModel;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static android.Manifest.permission.INTERNET;
+import static android.Manifest.permission.READ_EXTERNAL_STORAGE;
 import static android.Manifest.permission.RECORD_AUDIO;
 
 public class MainActivity extends AppCompatActivity {
@@ -45,34 +62,28 @@ public class MainActivity extends AppCompatActivity {
     // Replace below with your own service region (e.g., "westus").
     private static final String SpeechRegion = "YourServiceRegion";
 
-    //
-    // Configuration for intent recognition
-    //
-
-    // Replace below with your own Language Understanding subscription key
-    // The intent recognition service calls the required key 'endpoint key'.
-    private static final String LanguageUnderstandingSubscriptionKey = "YourLanguageUnderstandingSubscriptionKey";
-    // Replace below with the deployment region of your Language Understanding application
-    private static final String LanguageUnderstandingServiceRegion = "YourLanguageUnderstandingServiceRegion";
-    // Replace below with the application ID of your Language Understanding application
-    private static final String LanguageUnderstandingAppId = "YourLanguageUnderstandingAppId";
+    // Replace below with your own Keyword model file, kws.table model file is configured for "Computer" keyword
+    private static final String KwsModelFile = "kws.table";
 
     private TextView recognizedTextView;
 
     private Button recognizeButton;
     private Button recognizeIntermediateButton;
     private Button recognizeContinuousButton;
-    private Button recognizeIntentButton;
+    private Button recognizeWithKeywordButton;
 
     private MicrophoneStream microphoneStream;
     private MicrophoneStream createMicrophoneStream() {
+        this.releaseMicrophoneStream();
+
+        microphoneStream = new MicrophoneStream();
+        return microphoneStream;
+    }
+    private void releaseMicrophoneStream() {
         if (microphoneStream != null) {
             microphoneStream.close();
             microphoneStream = null;
         }
-
-        microphoneStream = new MicrophoneStream();
-        return microphoneStream;
     }
 
     @Override
@@ -81,11 +92,12 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         recognizedTextView = findViewById(R.id.recognizedText);
+        recognizedTextView.setMovementMethod(new ScrollingMovementMethod());
 
         recognizeButton = findViewById(R.id.buttonRecognize);
         recognizeIntermediateButton = findViewById(R.id.buttonRecognizeIntermediate);
         recognizeContinuousButton = findViewById(R.id.buttonRecognizeContinuous);
-        recognizeIntentButton = findViewById(R.id.buttonRecognizeIntent);
+        recognizeWithKeywordButton = findViewById(R.id.buttonRecognizeWithKeyword);
 
         // Initialize SpeechSDK and request required permissions.
         try {
@@ -94,17 +106,19 @@ public class MainActivity extends AppCompatActivity {
             int permissionRequestId = 5;
 
             // Request permissions needed for speech recognition
-            ActivityCompat.requestPermissions(MainActivity.this, new String[]{RECORD_AUDIO, INTERNET}, permissionRequestId);
+            ActivityCompat.requestPermissions(MainActivity.this, new String[]{RECORD_AUDIO, INTERNET, READ_EXTERNAL_STORAGE}, permissionRequestId);
         }
         catch(Exception ex) {
             Log.e("SpeechSDK", "could not init sdk, " + ex.toString());
             recognizedTextView.setText("Could not initialize: " + ex.toString());
         }
 
-        // create config 
+        // create config
         final SpeechConfig speechConfig;
+        final KeywordRecognitionModel kwsModel;
         try {
             speechConfig = SpeechConfig.fromSubscription(SpeechSubscriptionKey, SpeechRegion);
+            kwsModel = KeywordRecognitionModel.fromFile(copyAssetToCacheAndGetFilePath(KwsModelFile));
         } catch (Exception ex) {
             System.out.println(ex.getMessage());
             displayException(ex);
@@ -121,7 +135,12 @@ public class MainActivity extends AppCompatActivity {
             clearTextBox();
 
             try {
-                // final AudioConfig audioInput = AudioConfig.fromDefaultMicrophoneInput();
+                // In general, if the device default microphone is used then it is enough
+                // to either have AudioConfig.fromDefaultMicrophoneInput or omit the audio
+                // config altogether.
+                // AudioConfig.fromStreamInput is specifically needed if you want to use an
+                // external microphone (including Bluetooth that couldn't be otherwise used)
+                // or mix audio from some other source to microphone audio.
                 final AudioConfig audioInput = AudioConfig.fromStreamInput(createMicrophoneStream());
                 final SpeechRecognizer reco = new SpeechRecognizer(speechConfig, audioInput);
 
@@ -154,7 +173,6 @@ public class MainActivity extends AppCompatActivity {
             clearTextBox();
 
             try {
-                // final AudioConfig audioInput = AudioConfig.fromDefaultMicrophoneInput();
                 final AudioConfig audioInput = AudioConfig.fromStreamInput(createMicrophoneStream());
                 final SpeechRecognizer reco = new SpeechRecognizer(speechConfig, audioInput);
 
@@ -215,8 +233,7 @@ public class MainActivity extends AppCompatActivity {
 
                 try {
                     content.clear();
-                    
-                    // audioInput = AudioConfig.fromDefaultMicrophoneInput();
+
                     audioInput = AudioConfig.fromStreamInput(createMicrophoneStream());
                     reco = new SpeechRecognizer(speechConfig, audioInput);
 
@@ -251,68 +268,88 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        final HashMap<String, String> intentIdMap = new HashMap<>();
-        intentIdMap.put("1", "play music");
-        intentIdMap.put("2", "stop");
-
         ///////////////////////////////////////////////////
-        // recognize intent
+        // recognize with keyword
         ///////////////////////////////////////////////////
-        recognizeIntentButton.setOnClickListener(view -> {
-            final String logTag = "intent";
-            final ArrayList<String> content = new ArrayList<>();
+        recognizeWithKeywordButton.setOnClickListener(new View.OnClickListener() {
+            private static final String logTag = "keyword";
+            private boolean continuousListeningStarted = false;
+            private SpeechRecognizer reco = null;
+            private AudioConfig audioInput = null;
+            private String buttonText = "";
+            private ArrayList<String> content = new ArrayList<>();
 
-            disableButtons();
-            clearTextBox();
+            @Override
+            public void onClick(final View view) {
+                final Button clickedButton = (Button) view;
+                disableButtons();
+                if (continuousListeningStarted) {
+                    if (reco != null) {
+                        final Future<Void> task = reco.stopKeywordRecognitionAsync();
+                        setOnTaskCompletedListener(task, result -> {
+                            Log.i(logTag, "Continuous recognition stopped.");
+                            MainActivity.this.runOnUiThread(() -> {
+                                clickedButton.setText(buttonText);
+                            });
+                            enableButtons();
+                            continuousListeningStarted = false;
+                        });
+                    } else {
+                        continuousListeningStarted = false;
+                    }
 
-            content.add("");
-            content.add("");
-            try {
-                final SpeechConfig intentConfig = SpeechConfig.fromSubscription(LanguageUnderstandingSubscriptionKey, LanguageUnderstandingServiceRegion);
-
-                // final AudioConfig audioInput = AudioConfig.fromDefaultMicrophoneInput();
-                final AudioConfig audioInput = AudioConfig.fromStreamInput(createMicrophoneStream());
-                final IntentRecognizer reco = new IntentRecognizer(intentConfig, audioInput);
-
-                LanguageUnderstandingModel intentModel = LanguageUnderstandingModel.fromAppId(LanguageUnderstandingAppId);
-                for (Map.Entry<String, String> entry : intentIdMap.entrySet()) {
-                    reco.addIntent(intentModel, entry.getValue(), entry.getKey());
+                    return;
                 }
 
-                reco.recognizing.addEventListener((o, intentRecognitionResultEventArgs) -> {
-                    final String s = intentRecognitionResultEventArgs.getResult().getText();
-                    Log.i(logTag, "Intermediate result received: " + s);
-                    content.set(0, s);
-                    setRecognizedText(TextUtils.join(System.lineSeparator(), content));
-                });
+                clearTextBox();
 
-                final Future<IntentRecognitionResult> task = reco.recognizeOnceAsync();
-                setOnTaskCompletedListener(task, result -> {
-                    Log.i(logTag, "Continuous recognition stopped.");
-                    String s = result.getText();
+                try {
+                    content.clear();
 
-                    if (result.getReason() != ResultReason.RecognizedIntent) {
-                        String errorDetails = (result.getReason() == ResultReason.Canceled) ? CancellationDetails.fromResult(result).getErrorDetails() : "";
-                        s = "Intent failed with " + result.getReason() + ". Did you enter your Language Understanding subscription?" + System.lineSeparator() + errorDetails;
-                    }
+                    audioInput = AudioConfig.fromStreamInput(createMicrophoneStream());
+                    reco = new SpeechRecognizer(speechConfig, audioInput);
 
-                    String intentId = result.getIntentId();
-                    String intent = "";
-                    if (intentIdMap.containsKey(intentId)) {
-                        intent = intentIdMap.get(intentId);
-                    }
-                    Log.i(logTag, "Final result received: " + s + ", intent: " + intent);
-                    content.set(0, s);
-                    content.set(1, " [intent: " + intent + "]");
-                    setRecognizedText(TextUtils.join(System.lineSeparator(), content));
-                    enableButtons();
-                });
-            } catch (Exception ex) {
-                System.out.println(ex.getMessage());
-                displayException(ex);
+                    reco.recognizing.addEventListener((o, speechRecognitionResultEventArgs) -> {
+                        final String s = speechRecognitionResultEventArgs.getResult().getText();
+                        Log.i(logTag, "Intermediate result received: " + s);
+                        content.add(s);
+                        setRecognizedText(TextUtils.join(" ", content));
+                        content.remove(content.size() - 1);
+                    });
+
+                    reco.recognized.addEventListener((o, speechRecognitionResultEventArgs) -> {
+                        final String s;
+                        if (speechRecognitionResultEventArgs.getResult().getReason() == ResultReason.RecognizedKeyword)
+                        {
+                            s = "Keyword: " + speechRecognitionResultEventArgs.getResult().getText();
+                            Log.i(logTag, "Keyword recognized result received: " + s);
+                        }
+                        else
+                        {
+                            s = "Recognized: " + speechRecognitionResultEventArgs.getResult().getText();
+                            Log.i(logTag, "Final result received: " + s);
+                        }
+                        content.add(s);
+                        setRecognizedText(TextUtils.join(" ", content));
+                    });
+
+                    final Future<Void> task = reco.startKeywordRecognitionAsync(kwsModel);
+                    setOnTaskCompletedListener(task, result -> {
+                        continuousListeningStarted = true;
+                        MainActivity.this.runOnUiThread(() -> {
+                            buttonText = clickedButton.getText().toString();
+                            clickedButton.setText("Stop");
+                            clickedButton.setEnabled(true);
+                        });
+                    });
+                } catch (Exception ex) {
+                    System.out.println(ex.getMessage());
+                    displayException(ex);
+                }
             }
         });
     }
+
 
     private void displayException(Exception ex) {
         recognizedTextView.setText(ex.getMessage() + System.lineSeparator() + TextUtils.join(System.lineSeparator(), ex.getStackTrace()));
@@ -342,7 +379,7 @@ public class MainActivity extends AppCompatActivity {
             recognizeButton.setEnabled(false);
             recognizeIntermediateButton.setEnabled(false);
             recognizeContinuousButton.setEnabled(false);
-            recognizeIntentButton.setEnabled(false);
+            recognizeWithKeywordButton.setEnabled(false);
         });
     }
 
@@ -351,7 +388,7 @@ public class MainActivity extends AppCompatActivity {
             recognizeButton.setEnabled(true);
             recognizeIntermediateButton.setEnabled(true);
             recognizeContinuousButton.setEnabled(true);
-            recognizeIntentButton.setEnabled(true);
+            recognizeWithKeywordButton.setEnabled(true);
         });
     }
 
@@ -365,6 +402,26 @@ public class MainActivity extends AppCompatActivity {
 
     private interface OnTaskCompletedListener<T> {
         void onCompleted(T taskResult);
+    }
+
+    private String copyAssetToCacheAndGetFilePath(String filename) {
+        File cacheFile = new File(getCacheDir() + "/" + filename);
+        if (!cacheFile.exists()) {
+            try {
+                InputStream is = getAssets().open(filename);
+                int size = is.available();
+                byte[] buffer = new byte[size];
+                is.read(buffer);
+                is.close();
+                FileOutputStream fos = new FileOutputStream(cacheFile);
+                fos.write(buffer);
+                fos.close();
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return cacheFile.getPath();
     }
 
     private static ExecutorService s_executorService;
